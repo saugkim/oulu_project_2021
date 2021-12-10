@@ -12,3 +12,6 @@ git push -u origin main
 git remote add origin https://github.com/saugkim/oulu_project_2021.git
 git branch -M main
 git push -u origin main
+
+
+git push https://<token>@github.com/<username>/<reponame>.git
