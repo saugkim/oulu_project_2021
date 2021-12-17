@@ -15,3 +15,6 @@ git push -u origin main
 
 
 git push https://<token>@github.com/<username>/<reponame>.git
+
+git config --global user.name "John Doe"
+git config --global user.email johndoe@example.com
