@@ -205,60 +205,71 @@ def calculate_fid(real_images, fake_images, model=inception_model):
     return fid_value
 
 
+# +
+def inception_score(imgs, cuda=True, batch_size=32, resize=False, splits=1):
+    from torch.autograd import Variable
+    from scipy.stats import entropy
+    """Computes the inception score of the generated images imgs
+    imgs -- Torch dataset of (3xHxW) numpy images normalized in the range [-1, 1]
+    cuda -- whether or not to run on GPU
+    batch_size -- batch size for feeding into Inception v3
+    splits -- number of splits
+    """
+    N = len(imgs)
 
-class Classifier(nn.Module):
-    def __init__(self):
-        super(Classifier, self).__init__()
-        self.conv1 = nn.Conv2d(in_channels=1, out_channels=16, kernel_size=5)
-        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
-        self.conv2 = nn.Conv2d(in_channels=16, out_channels=32, kernel_size=5)
-        self.fc1 = nn.Linear(32*4*4, 120)
-        self.fc2 = nn.Linear(120, 84)
-        self.fc3 = nn.Linear(84, 10)
+    assert batch_size > 0
+    assert N > batch_size
 
-    @classmethod
-    def pretrained(cls):
-        model = cls()
-        model.load_state_dict(torch.load('classifier.pth', map_location=lambda storage, loc: storage))
-        return model
+    # Set up dtype
+    if cuda:
+        dtype = torch.cuda.FloatTensor
+    else:
+        if torch.cuda.is_available():
+            print("WARNING: You have a CUDA device, so you should probably set cuda=True")
+        dtype = torch.FloatTensor
 
-    def forward(self, x):
-        """
-        Args:
-          x of shape (batch_size, 1, 28, 28): Input images.
-        
-        Returns:
-          y of shape (batch_size, 10): Outputs of the network.
-        """
-        x = self.conv1(x)
-        x = self.pool(F.relu(x))
-        x = self.conv2(x)
-        x = self.pool(F.relu(x))
-        x = x.view(-1, self.fc1.in_features)
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        x = self.fc3(x)
-        return x
+    # Set up dataloader
+    dataloader = torch.utils.data.DataLoader(imgs, batch_size=batch_size)
 
-    def get_activations(self, x):
-        """
-        Args:
-          x of shape (batch_size, 1, 28, 28): Input images.
-        
-        Returns:
-          y of shape (batch_size, 10): Outputs of the network.
-        """
-        x = self.conv1(x)
-        x = self.pool(F.relu(x))
-        x = self.conv2(x)
-        x = self.pool(F.relu(x))
-        x = x.view(-1, self.fc1.in_features)
-        x = F.relu(self.fc1(x))
-        #x = F.relu(self.fc2(x))
-        #x = self.fc3(x)
-        return x
+    # Load inception model
+    inception_model = inception_v3(pretrained=True, transform_input=False).type(dtype)
+    inception_model.eval();
+    up = nn.Upsample(size=(299, 299), mode='bilinear', align_corners=True).type(dtype)
+    def get_pred(x):
+        if resize:
+            x = up(x)
+        x = inception_model(x)
+        return F.softmax(x, dim=1).data.cpu().numpy()
+
+    # Get predictions
+    preds = np.zeros((N, 1000))
+
+    for i, batch in enumerate(dataloader, 0):
+        batch = batch.type(dtype)
+        batchv = Variable(batch)
+        batch_size_i = batch.size()[0]
+
+        preds[i*batch_size:i*batch_size + batch_size_i] = get_pred(batchv)
+
+    # Now compute the mean kl-div
+    split_scores = []
+
+    for k in range(splits):
+        part = preds[k * (N // splits): (k+1) * (N // splits), :]
+        py = np.mean(part, axis=0)
+        scores = []
+        for i in range(part.shape[0]):
+            pyx = part[i, :]
+            scores.append(entropy(pyx, py))
+        split_scores.append(np.exp(np.mean(scores)))
+
+    return np.mean(split_scores), np.std(split_scores)
 
 
+# https://github.com/sbarratt/inception-score-pytorch
+# https://arxiv.org/abs/1801.01973: A Note on the Inception Score
+
+# -
 def frechet_distance(mu1, sigma1, mu2, sigma2, eps=1e-6):
     """Numpy implementation of the Frechet Distance.
     The Frechet distance between two multivariate Gaussians X_1 ~ N(mu_1, C_1)
@@ -308,44 +319,3 @@ def frechet_distance(mu1, sigma1, mu2, sigma2, eps=1e-6):
     tr_covmean = np.trace(covmean)
 
     return (diff.dot(diff) + np.trace(sigma1) + np.trace(sigma2) - 2 * tr_covmean)
-
-
-class FDScore(nn.Module):
-    def __init__(self):
-        super(FDScore, self).__init__()
-        self.net = net = Classifier.pretrained()
-        self.net.eval()
-        
-    def train(self, trainset, batch_size):
-        'Compute statistic from training set'
-        dataloader = torch.utils.data.DataLoader(trainset, batch_size=batch_size)
-        device = next(self.net.parameters()).device
-        
-        n = 0
-        self.mu = 0
-        self.sigma = 0
-        for batch in dataloader:
-            samples = batch[0].to(device)
-            activations = self.get_activations(samples)
-
-            batch_size = samples.size(0)
-            w_old = n / (n + batch_size)
-            w_new = batch_size / (n + batch_size)
-
-            self.mu = w_old * self.mu + w_new * np.mean(activations, axis=0)
-            self.sigma = w_old * self.sigma + w_new * np.cov(activations, rowvar=False)
-            n = n + batch_size
-
-    def get_activations(self, samples):
-        with torch.no_grad():
-            return self.net.get_activations(samples).cpu().numpy()
-
-    def calculate(self, samples):
-        minmax = np.array([samples.cpu().numpy().min(), samples.cpu().numpy().max()])
-        if not np.allclose(minmax, np.array([-1., 1.]), rtol=0.1, atol=0.1):
-            print('Warning: the pixel values should be in the range [-1, 1]. The range in the samples is %s.' % minmax)
-        act_fake = self.get_activations(samples)
-        mu_fake = np.mean(act_fake, axis=0)
-        sigma_fake = np.cov(act_fake, rowvar=False)
-
-        return frechet_distance(mu_fake, sigma_fake, self.mu, self.sigma)
