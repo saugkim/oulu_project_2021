@@ -319,3 +319,12 @@ def frechet_distance(mu1, sigma1, mu2, sigma2, eps=1e-6):
     tr_covmean = np.trace(covmean)
 
     return (diff.dot(diff) + np.trace(sigma1) + np.trace(sigma2) - 2 * tr_covmean)
+
+# +
+
+# https://github.com/mseitzer/pytorch-fid/blob/master/src/pytorch_fid/inception.py
+# https://www.kaggle.com/ibtesama/gan-in-pytorch-with-fid/notebook
+# https://machinelearningmastery.com/how-to-implement-the-frechet-inception-distance-fid-from-scratch/
+# -
+
+
